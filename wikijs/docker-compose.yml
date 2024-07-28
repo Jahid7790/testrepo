@@ -1,0 +1,10 @@
+version: '3.5'
+services:
+  wiki:
+    image: requarks/wiki:2
+    container_name: wiki
+    restart: always
+    ports:
+      - "10205:3000"
+    volumes:
+      - ./data:/var/wiki/data
