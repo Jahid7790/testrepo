@@ -1,0 +1,1059 @@
+# version: '3.8'
+
+services:
+  # qTrader Services
+  # GUNICORN Worker per container = (2 x num of cores + 1) / total num containers
+  qtrader_broker:
+    image: 192.168.155.22:5000/qtrader_app:2.0.7
+    logging:
+      driver: syslog
+    command: ["gunicorn", "--reload", "--workers=5","--worker-class=gevent", "--worker-connections=1000", "--timeout=120", "-b", "0.0.0.0:5657", "app:app"]
+    ports:  
+      - 5501-5505:5657
+    depends_on:
+      - redis
+    env_file:
+      - '.env'
+    volumes:
+      - ../protected:/app/app/protected
+      - ../protected/static/uploads:/app/app/static/uploads
+      - ../branding/broker-logo-dark.png:/app/app/static/images/broker-logo-dark.png
+      - ../branding/broker-logo-light.png:/app/app/static/images/broker-logo-light.png
+      - ../config/qtrader/broker_config.py:/app/app/config.py
+      - ../config/qtrader/file_config.py:/app/app/file_config.py
+      - ../config/qtrader/ws_config.js:/app/app/static/js/feeds/ws_config.js
+    deploy:
+      replicas: 5
+    restart: unless-stopped
+  
+  qtrader_broker_trade:
+    image: 192.168.155.22:5000/qtrader_app:2.0.7
+    logging:
+      driver: syslog
+    command: ["gunicorn", "--reload", "--workers=3","--worker-class=gevent", "--worker-connections=1000", "--timeout=120", "-b", "0.0.0.0:5657", "app:app"]
+    ports:  
+      - 5551-5553:5657
+    depends_on:
+      - redis
+    env_file:
+      - '.env'
+    volumes:
+      - ../protected:/app/app/protected
+      - ../protected/static/uploads:/app/app/static/uploads
+      - ../branding/broker-logo-dark.png:/app/app/static/images/broker-logo-dark.png
+      - ../branding/broker-logo-light.png:/app/app/static/images/broker-logo-light.png
+      - ../config/qtrader/broker_config.py:/app/app/config.py
+      - ../config/qtrader/file_config.py:/app/app/file_config.py
+      - ../config/qtrader/ws_config.js:/app/app/static/js/feeds/ws_config.js
+    deploy:
+      replicas: 3
+    restart: unless-stopped
+
+  celery:
+    image: 192.168.155.22:5000/qtrader_app:2.0.7
+    logging:
+      driver: syslog
+    container_name: celery
+    command: celery --app app.tasks.celery worker -l INFO -E
+    volumes:
+      - ../config/qtrader/broker_config.py:/app/app/config.py
+    env_file:
+      - '.env'
+    links:
+      - redis
+    depends_on:
+      - redis
+    restart: unless-stopped
+  
+  celery-beat:
+      image: 192.168.155.22:5000/qtrader_app:2.0.7
+      logging:
+        driver: syslog
+      container_name: celery-beat
+      command: celery --app app.tasks.celery beat -l INFO
+      volumes:
+      - ../config/qtrader/broker_config.py:/app/app/config.py
+      env_file:
+        - '.env'
+      links:
+        - celery
+        - redis
+      depends_on:
+        - celery
+        - redis
+      restart: unless-stopped
+
+  # DSE FIX Engine Services
+  fix-engine:
+    network_mode: host
+    image: 192.168.155.22:5000/fix_engine:1.1.09
+    logging:
+      driver: syslog
+    container_name: fix_engine
+    command: bash -c "./start_fix_engine_intraday.sh"
+    env_file:
+      - '.env'
+    volumes:
+      - ../logs/DSE/FIX:/engine/logs
+      - /dev/sda:/host_dev/sda:ro
+      - ../config/DSE_FIX/dse_fix_config.py:/engine/config.py
+      - ../config/DSE_FIX/engine.properties:/engine/engine.properties
+      - ../config/DSE_FIX/engine.license:/engine/engine.license
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+      - trade-sync
+      - rms-data-sync
+      - qty-sync
+      - cash-sync
+      - engine-status
+      # - ws_sync
+    restart: 'no'
+
+  # CSE FIX Services
+  fix-cse-engine:
+    network_mode: host
+    image: 192.168.155.22:5000/fix_cse_engine:1.1.02
+    logging:
+      driver: syslog
+    container_name: fix_cse_engine
+    command: bash -c "./start_fix_cse_engine_intraday.sh"
+    env_file:
+      - '.env'    
+    volumes:
+      - /dev/sda:/host_dev/sda:ro
+      - ../logs/CSE/FIX:/engine/logs
+      - ../config/CSE_FIX/cse_fix_config.py:/engine/config.py
+      - ../config/CSE_FIX/engine.properties:/engine/engine.properties
+      - ../config/CSE_FIX/engine.license:/engine/engine.license
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: 'no'
+
+  trade-sync:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    logging:
+      driver: syslog
+    container_name: trade_sync
+    command: ["python", "fix_trade_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+  
+  parking-order-sync:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    container_name: parking_order_sync
+    command: ["python", "fix_parking_order_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: 'no'
+
+  fix-order-throttling-sync:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    container_name: fix_order_throttling_sync
+    command: ["python", "fix_order_throttling_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: 'no'
+
+  # # order-sync:
+  # #   image: 192.168.155.22:5000/fix_sync:2.0.6
+  # #   logging:
+  # #     driver: syslog
+  # #   container_name: order_sync
+  # #   command: ["python", "fix_order_sync.py"]
+  # #   env_file:
+  # #     - '.env'
+  # #   volumes:
+  # #     - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+  # #     - /etc/timezone:/etc/timezone:ro
+  # #     - /etc/localtime:/etc/localtime:ro
+  # #   depends_on:
+  # #     - mqtt_server
+  # #   restart: unless-stopped
+  
+  cash-sync:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    logging:
+      driver: syslog
+    container_name: cash_sync
+    command: ["python", "fix_cash_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+  
+  qty-sync:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    logging:
+      driver: syslog
+    container_name: qty_sync
+    command: ["python", "fix_qty_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+
+  rms-data-sync:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    logging:
+      driver: syslog
+    container_name: rms_data_sync
+    command: ["python", "rms_data_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+  
+  broker-limit-sync:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    container_name: broker_limit_sync
+    command: ["python", "fix_broker_limit_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+  
+  cse-broker-limit-init:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    build: ../dsefix/modules
+    container_name: cse_broker_limit_init
+    command: ["python", "cse_broker_limit.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  send-turnover:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    container_name: send_turnover
+    command: ["python", "send_turnover.py"]
+    env_file:
+      - '.env'
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: 'no'
+
+  # DSE ITCH Services
+  itch-engine:
+    network_mode: host
+    image: 192.168.155.22:5000/marketdata_engine:1.1.15
+    logging:
+      driver: syslog
+    container_name: itch_engine
+    command: bash -c "./start_itch_engine.sh"
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_config.py:/engine/config.py
+      - ../logs/DSE/ITCH:/engine/logs
+      - /dev/sda:/host_dev/sda:ro
+      - ../config/DSE_ITCH/engine.properties:/engine/engine.properties
+      - ../config/DSE_ITCH/engine.license:/engine/engine.license
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+      - symbol-sync
+      - suspend-sync
+      - bbo-sync
+      - cp-sync
+      - index-sync
+      - ltp-sync
+      - mktdepth-sync
+      - mktstatus-sync
+      - news-sync
+      - refp-sync
+      - engine-status
+      # - ws_sync
+    restart: 'no'
+
+  # CSE FAST Engine
+  cse-fast-engine:
+    network_mode: host
+    image: 192.168.155.22:5000/cse_fast_engine:1.1.02
+    logging:
+      driver: syslog
+    container_name: cse_fast_engine
+    command: bash -c "./start_fast_engine.sh"
+    env_file:
+      - '.env'
+    volumes:
+      - /dev/sda:/host_dev/sda:ro
+      - ../config/CSE_FAST/cse_fast_config.py:/engine/config.py
+      - ../config/CSE_FAST/CseClient.xml:/engine/CseClient.xml
+      - ../logs/CSE/FAST:/engine/logs
+      - ../config/CSE_FAST/engine.properties:/engine/engine.properties
+      - ../config/CSE_FAST/engine.license:/engine/engine.license
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: 'no'
+
+  symbol-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: symbol_sync
+    command: ["python", "symbol_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+  
+  cse-symbol-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_symbol_sync
+    command: ["python", "cse_symbol_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+  
+  suspend-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: suspend_sync
+    command: ["python", "suspend_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+  
+  cse-suspend-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_suspend_sync
+    command: ["python", "cse_suspend_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+  
+  bbo-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: bbo_sync
+    command: ["python", "bbo_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+
+  cse-bbo-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_bbo_sync
+    command: ["python", "cse_bbo_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+  
+  chart-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: chart_sync
+    command: ["python", "chart_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+
+  cse-chart-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_chart_sync
+    command: ["python", "cse_chart_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  cp-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: cp_sync
+    command: ["python", "cp_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+  
+  cse-cp-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_cp_sync
+    command: ["python", "cse_cp_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  engine-status:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: engine_status
+    command: ["python", "engine_status.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+
+  index-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: index_sync
+    command: ["python", "index_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+  
+  cse-index-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_index_sync
+    command: ["python", "cse_index_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  ltp-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: ltp_sync
+    command: ["python", "ltp_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+  
+  cse-ltp-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_ltp_sync
+    command: ["python", "cse_ltp_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  cse-ltp-stats-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_ltp_stats_sync
+    command: ["python", "cse_ltp_stats_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+  
+  mktdepth-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: mktdepth_sync
+    command: ["python", "mktdepth_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+
+  cse-mktdepth-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_mktdepth_sync
+    command: ["python", "cse_mktdepth_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  mktstatus-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: mktstatus_sync
+    command: ["python", "mktstatus_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+  
+  cse-mktstatus-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_mktstatus_sync
+    command: ["python", "cse_mktstatus_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  news-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: news_sync
+    command: ["python", "news_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: 'no'
+  
+  cse-news-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    container_name: cse_news_sync
+    command: ["python", "cse_news_sync.py"]
+    env_file:
+      - '.env'
+    depends_on:
+      - mqtt_server
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: 'no'
+
+  refp-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: refp_sync
+    command: ["python", "refp_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+
+  tp-sl-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: tp_sl_sync
+    command: ["python", "tp_sl_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+
+  alert-sync:
+    image: 192.168.155.22:5000/marketdata_sync:2.0.5
+    logging:
+      driver: syslog
+    container_name: alert_sync
+    command: ["python", "alert_sync.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_ITCH/dse_itch_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - mqtt_server
+    restart: unless-stopped
+
+  # ws_sync:
+  #     image: 192.168.155.22:5000/qtrader_websocket_service:1.1.30
+  #     container_name: ws_sync
+  #     command: ["python", "ws_sync.py"]   
+  #     env_file:
+  #       - '.env'
+  #     logging:
+  #       driver: syslog
+  #     depends_on:
+  #       - mqtt_server
+  #     volumes:
+  #       - ../config/websocket/config.py:/app/config.py
+  #       - /etc/timezone:/etc/timezone:ro
+  #       - /etc/localtime:/etc/localtime:ro
+  #     restart: unless-stopped
+
+  ws_sync:
+    image: 192.168.155.22:5000/qtrader_websocket_service:1.1.30
+    container_name: ws_sync
+    command: ["python", "ws_sync.py"]   
+    env_file:
+      - '.env'
+    logging:
+      driver: syslog
+    depends_on:
+      - mqtt_server
+    volumes:
+      - ../config/websocket/config.py:/app/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  # ws_sync_dev:
+  #     build: ../websocket/feed/
+  #     image: 192.168.155.22:5000/qtrader_websocket_service:1.1.30
+  #     container_name: ws_sync_dev
+  #     command: ["python", "ws_sync_dev.py"]   
+  #     env_file:
+  #       - '.env'
+  #     logging:
+  #       driver: syslog
+  #     depends_on:
+  #       - mqtt_server
+  #     volumes:
+  #       - '../websocket/feed:/app'
+  #       - /etc/timezone:/etc/timezone:ro
+  #       - /etc/localtime:/etc/localtime:ro
+  #     restart: unless-stopped
+
+  # ws_sync_socket:      
+  #   image: 192.168.155.22:5000/qtrader_websocket_service:1.1.30
+  #   container_name: ws_sync_socket
+  #   command: ["python", "ws_sync_socket.py"]   
+  #   env_file:
+  #     - '.env'
+  #   logging:
+  #     driver: syslog
+  #   depends_on:
+  #     - mqtt_server
+  #   volumes:
+  #     - ../config/websocket/config.py:/app/config.py
+  #     - /etc/timezone:/etc/timezone:ro
+  #     - /etc/localtime:/etc/localtime:ro
+  #   restart: unless-stopped
+
+  ws_sync_md:
+    image: 192.168.155.22:5000/qtrader_websocket_service:1.1.30
+    container_name: ws_sync_md
+    command: ["python", "ws_sync_md.py"]   
+    env_file:
+      - '.env'
+    logging:
+      driver: syslog
+    depends_on:
+      - mqtt_server
+    volumes:
+      - ../config/websocket/config.py:/app/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+  
+  ws_sync_fix:
+    image: 192.168.155.22:5000/qtrader_websocket_service:1.1.30
+    container_name: ws_sync_fix
+    command: ["python", "ws_sync_fix.py"]   
+    env_file:
+      - '.env'
+    logging:
+      driver: syslog
+    depends_on:
+      - mqtt_server
+    volumes:
+      - ../config/websocket/config.py:/app/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  ws_sync_md_mobile:
+    image: 192.168.155.22:5000/qtrader_websocket_service:1.1.30
+    container_name: ws_sync_md_mobile
+    command: ["python", "ws_sync_md_mobile.py"]   
+    env_file:
+      - '.env'
+    logging:
+      driver: syslog
+    depends_on:
+      - mqtt_server
+    volumes:
+      - ../config/websocket/config.py:/app/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+  
+  ws_sync_fix_mobile:
+    image: 192.168.155.22:5000/qtrader_websocket_service:1.1.30
+    container_name: ws_sync_fix_mobile
+    command: ["python", "ws_sync_fix_mobile.py"]   
+    env_file:
+      - '.env'
+    logging:
+      driver: syslog
+    depends_on:
+      - mqtt_server
+    volumes:
+      - ../config/websocket/config.py:/app/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  node_socket:
+    container_name: node_socket
+    image: 192.168.155.22:5000/qtrader_node_socket_service:1.0.04
+    ports:
+      - 3001:3001
+    volumes:        
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  node_socket_md:
+    container_name: node_socket_md
+    image: 192.168.155.22:5000/qtrader_node_socket_service:1.0.04
+    ports:
+      - 3002:3001
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  node_socket_fix_mobile:
+    container_name: node_socket_fix_mobile
+    image: 192.168.155.22:5000/qtrader_node_socket_service:1.0.04
+    ports:
+      - 3003:3001
+    volumes:        
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  node_socket_md_mobile:
+    container_name: node_socket_md_mobile
+    image: 192.168.155.22:5000/qtrader_node_socket_service:1.0.04
+    ports:
+      - 3004:3001
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+
+  # In-memory DB Services
+  redis:
+    image: redis:3.0-alpine
+    logging:
+      driver: syslog
+    container_name: redis
+    command: redis-server --requirepass devpassword
+    volumes:
+      - redis:/var/lib/redis/data
+    ports:
+      - 6455:6379
+    restart: unless-stopped
+
+  redis_cache_clear:
+    image: 192.168.155.22:5000/qtrader_misc_services_redis_cache_clear:1.5.15
+    container_name: redis_cache_clear
+    volumes:
+      - ../config/misc_services/misc_services_config.py:/app/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    command: [ "python", "redis_clear_cache.py" ]
+    depends_on:      
+      - redis
+    logging:
+      driver: syslog
+    restart: 'no'
+
+  dse-circuit-sync:
+    image: 192.168.155.22:5000/qtrader_misc_services_circuit_sync:1.5.01
+    container_name: dse_circuit_sync
+    command: ["python", "circuit_calculation_sync.py", "DSE"]
+    volumes:
+      - ../config/misc_services/misc_services_config.py:/app/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: 'no'
+
+  cse-circuit-sync:
+    image: 192.168.155.22:5000/qtrader_misc_services_circuit_sync:1.5.01
+    container_name: cse_circuit_sync
+    command: ["python", "circuit_calculation_sync.py", "CSE"]
+    volumes:
+      - ../config/misc_services/misc_services_config.py:/app/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: 'no'
+  
+  # DB Flush Service
+  flush_db:
+    image: 192.168.155.22:5000/fix_sync:2.0.6
+    logging:
+      driver: syslog
+    container_name: flush_db
+    command: ["python", "flush_db.py"]
+    env_file:
+      - '.env'
+    volumes:
+      - ../config/DSE_FIX/dse_fix_module_config.py:/modules/config.py
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: 'no'
+
+  # Nginx Services
+  # Single Certbot SSL Certificate for all domains: oms.uftcl.com
+  nginx:
+    image: nginx:1.17
+    logging:
+      driver: syslog
+    container_name: nginx
+    volumes:
+      - ./nginx.http.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx.main.conf:/etc/nginx/nginx.conf
+      - /etc/letsencrypt/live/uat.sheltechbrokerage.com/fullchain.pem:/ssl/qtrader/fullchain.pem:ro
+      - /etc/letsencrypt/live/uat.sheltechbrokerage.com/privkey.pem:/ssl/qtrader/privkey.pem:ro
+      - /etc/letsencrypt/live/uat-ws-fix.sheltechbrokerage.com/fullchain.pem:/ssl/wsfix/fullchain.pem:ro
+      - /etc/letsencrypt/live/uat-ws-fix.sheltechbrokerage.com/privkey.pem:/ssl/wsfix/privkey.pem:ro
+      - /etc/letsencrypt/live/uat-ws-md.sheltechbrokerage.com/fullchain.pem:/ssl/wsmd/fullchain.pem:ro
+      - /etc/letsencrypt/live/uat-ws-md.sheltechbrokerage.com/privkey.pem:/ssl/wsmd/privkey.pem:ro
+      - /etc/letsencrypt/live/uat-mobile-ws-fix.sheltechbrokerage.com/fullchain.pem:/ssl/mobile_wsfix/fullchain.pem:ro
+      - /etc/letsencrypt/live/uat-mobile-ws-fix.sheltechbrokerage.com/privkey.pem:/ssl/mobile_wsfix/privkey.pem:ro
+      - /etc/letsencrypt/live/uat-mobile-ws-md.sheltechbrokerage.com/fullchain.pem:/ssl/mobile_wsmd/fullchain.pem:ro
+      - /etc/letsencrypt/live/uat-mobile-ws-md.sheltechbrokerage.com/privkey.pem:/ssl/mobile_wsmd/privkey.pem:ro
+      - /etc/letsencrypt/live/uatomsapi.sheltechbrokerage.com/fullchain.pem:/ssl/omsapi_quantbd/fullchain.pem:ro
+      - /etc/letsencrypt/live/uatomsapi.sheltechbrokerage.com/privkey.pem:/ssl/omsapi_quantbd/privkey.pem:ro
+    ports:
+      - 80:80
+      - 443:443
+    restart: unless-stopped
+  
+  # MQTT Server
+  mqtt_server:
+    container_name: mqtt_server
+    image: eclipse-mosquitto:2.0
+    logging:
+      driver: syslog
+    volumes:
+      - ../config/MQTT/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mqtt_data:/mosquitto/data
+      - mqtt_logs:/mosquitto/log
+    ports:
+      - 7760:1883
+      - 7761:9001
+    restart: unless-stopped
+
+
+  flower:  
+    image: mher/flower:0.9.7
+    logging:
+      driver: syslog
+    container_name: flower
+    command: ["flower","--basic_auth=nateqminar:lambo640-4sv", "--broker=redis://:devpassword@redis:6379/0", "--port=8888"]
+    ports:
+      - 9898:8888
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  # dozzle:
+  #   container_name: dozzle
+  #   image: 'amir20/dozzle:latest'
+  #   volumes:
+  #     - '/var/run/docker.sock:/var/run/docker.sock'
+  #   ports:
+  #     - '10205:8080'
+  #   environment:
+  #     - DOZZLE_USERNAME=quant
+  #     - DOZZLE_PASSWORD=Qts@321%
+  #     - DOZZLE_NO_ANALYTICS=true
+
+volumes:
+  redis:
+  mqtt_data:
+  mqtt_logs:
+
+networks:
+  default:
+    external: true
+    name: qtrader_prod
